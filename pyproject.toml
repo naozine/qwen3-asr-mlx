@@ -1,0 +1,11 @@
+[project]
+name = "qwen3-asr-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx-audio>=0.4.2",
+    "nagisa>=0.2.12",
+    "soundfile>=0.13.1",
+]
