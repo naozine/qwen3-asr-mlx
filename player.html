@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Qwen3-ASR Transcript Player</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #222;
+    --muted: #888;
+    --accent: #ffd83b;
+    --active: #ffb300;
+    --border: #ddd;
+    --silence: #e9ecef;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.9;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    background: #fff;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    z-index: 10;
+  }
+  .controls {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 140px; }
+  button {
+    border: 1px solid var(--border); background: #fff; padding: 4px 10px;
+    border-radius: 4px; cursor: pointer; font-size: 13px;
+  }
+  button.on { background: var(--accent); border-color: var(--active); color: #000; }
+  .drop {
+    padding: 40px 20px;
+    margin: 20px;
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .drop.hover { border-color: var(--active); background: #fffbe6; }
+  .drop.hidden { display: none; }
+  audio { width: 100%; margin-top: 8px; }
+  main { padding: 20px 24px 120px; }
+
+  /* === Flow view === */
+  #flow .word {
+    display: inline-block;
+    padding: 1px 2px;
+    margin: 0 1px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.1s;
+    vertical-align: baseline;
+  }
+  #flow .word:hover { background: var(--accent); }
+  #flow .word.active { background: var(--active); color: #000; }
+  #flow .gap {
+    display: inline-block;
+    height: 0.6em;
+    background: var(--silence);
+    border-radius: 3px;
+    vertical-align: middle;
+    margin: 0 4px;
+  }
+  #flow .gap.line-break { display: block; height: 6px; margin: 6px 0; }
+
+  /* === Timeline view === */
+  #timeline { display: none; }
+  .tl-row {
+    position: relative;
+    height: 48px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 4px;
+  }
+  .tl-time {
+    position: absolute;
+    left: 0; top: -14px;
+    font-size: 10px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .tl-word {
+    position: absolute;
+    bottom: 4px;
+    padding: 1px 2px;
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+    line-height: 1.1;
+    transition: background 0.1s;
+  }
+  .tl-word:hover { background: var(--accent); z-index: 2; }
+  .tl-word.active { background: var(--active); color: #000; z-index: 3; }
+  .playhead {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 2px;
+    background: #ff3860;
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 0 4px rgba(255, 56, 96, 0.6);
+  }
+  .playhead::before {
+    content: '';
+    position: absolute;
+    top: -4px; left: -4px;
+    width: 10px; height: 10px;
+    background: #ff3860;
+    border-radius: 50%;
+  }
+
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .hint { font-size: 12px; color: var(--muted); }
+  kbd {
+    background: #eee; border: 1px solid #ccc; border-radius: 3px;
+    padding: 1px 5px; font-size: 11px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <audio id="audio" controls></audio>
+  <div class="controls">
+    <button id="btn-flow" class="on">流れ</button>
+    <button id="btn-timeline">タイムライン</button>
+    <label id="ctl-gap">無音しきい値 <input id="gap-thresh" type="range" min="0.1" max="2" step="0.1" value="0.4"><span id="gap-val">0.4s</span></label>
+    <label id="ctl-window" style="display:none">1行 <input id="window-sec" type="range" min="4" max="20" step="1" value="8"><span id="window-val">8s</span></label>
+    <span class="hint"><kbd>Space</kbd> 再生/停止 <kbd>←</kbd>/<kbd>→</kbd> 5秒</span>
+  </div>
+  <div class="meta"><span id="status">音声とJSONを読み込んでください</span></div>
+</header>
+
+<div id="drop" class="drop">
+  <p><strong>クリック</strong> または <strong>ドラッグ&ドロップ</strong><br>
+  音声 (.wav/.mp3) と result.json を読み込む</p>
+  <input id="file" type="file" multiple accept="audio/*,application/json,.json" hidden>
+</div>
+
+<main>
+  <div id="flow"></div>
+  <div id="timeline"></div>
+</main>
+
+<script>
+const audio = document.getElementById('audio');
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const flowEl = document.getElementById('flow');
+const timelineEl = document.getElementById('timeline');
+const statusEl = document.getElementById('status');
+const btnFlow = document.getElementById('btn-flow');
+const btnTl = document.getElementById('btn-timeline');
+const gapRange = document.getElementById('gap-thresh');
+const gapVal = document.getElementById('gap-val');
+const winRange = document.getElementById('window-sec');
+const winVal = document.getElementById('window-val');
+const ctlGap = document.getElementById('ctl-gap');
+const ctlWin = document.getElementById('ctl-window');
+
+let words = [];
+let wordEls = [];       // flow view word elements
+let tlWordEls = [];     // timeline view word elements
+let currentIdx = -1;
+let mode = 'flow';
+let playhead = null;
+let rafId = 0;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// 話速 (sec/char) に応じたフォントサイズ。小さすぎ/大きすぎはクランプ
+const FONT_MIN_PX = 9;
+const FONT_MAX_PX = 13;
+function fontSizeFor(word, baseSize = 12) {
+  const chars = Math.max(word.text.length, 1);
+  const secPerChar = (word.end - word.start) / chars;
+  const ratio = Math.sqrt(secPerChar / 0.12);
+  return Math.max(FONT_MIN_PX, Math.min(FONT_MAX_PX, baseSize * ratio));
+}
+
+function renderFlow() {
+  flowEl.innerHTML = '';
+  wordEls = [];
+  const gapThresh = parseFloat(gapRange.value);
+  const totalDur = words.length ? words[words.length - 1].end : 0;
+  const baseSize = 16;
+
+  words.forEach((w, i) => {
+    const prev = i > 0 ? words[i - 1] : null;
+    if (prev) {
+      const gap = w.start - prev.end;
+      if (gap >= gapThresh) {
+        const gapEl = document.createElement('span');
+        // gapの長さを視覚化: 幅を時間に比例 (上限200px)
+        const width = Math.min(200, gap * 40);
+        const isLong = gap >= 1.0;
+        gapEl.className = 'gap' + (isLong ? ' line-break' : '');
+        if (isLong) {
+          gapEl.style.width = Math.min(100, gap * 20) + '%';
+        } else {
+          gapEl.style.width = width + 'px';
+        }
+        gapEl.title = `無音 ${gap.toFixed(2)}s`;
+        flowEl.appendChild(gapEl);
+      }
+    }
+    const span = document.createElement('span');
+    span.className = 'word';
+    span.textContent = w.text;
+    span.dataset.idx = i;
+    span.style.fontSize = fontSizeFor(w, baseSize) + 'px';
+    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s (${w.text.length}字/${(w.end - w.start).toFixed(2)}s)`;
+    span.addEventListener('click', () => {
+      audio.currentTime = w.start;
+      audio.play();
+    });
+    flowEl.appendChild(span);
+    wordEls.push(span);
+  });
+  setStatus(`${words.length} 語 / ${totalDur.toFixed(1)}s`);
+}
+
+function renderTimeline() {
+  timelineEl.innerHTML = '';
+  tlWordEls = new Array(words.length);
+  if (!words.length) return;
+  const windowSec = parseFloat(winRange.value);
+  const totalDur = words[words.length - 1].end;
+  const numRows = Math.ceil(totalDur / windowSec);
+
+  const rows = [];
+  for (let r = 0; r < numRows; r++) {
+    const row = document.createElement('div');
+    row.className = 'tl-row';
+    const t = document.createElement('div');
+    t.className = 'tl-time';
+    const rowStart = r * windowSec;
+    t.textContent = formatTime(rowStart);
+    row.appendChild(t);
+    timelineEl.appendChild(row);
+    rows.push(row);
+  }
+
+  words.forEach((w, i) => {
+    const rowIdx = Math.floor(w.start / windowSec);
+    if (rowIdx >= rows.length) return;
+    const rowStart = rowIdx * windowSec;
+    const leftPct = ((w.start - rowStart) / windowSec) * 100;
+    const widthPct = Math.max(0.5, ((w.end - w.start) / windowSec) * 100);
+    const span = document.createElement('span');
+    span.className = 'tl-word';
+    span.textContent = w.text;
+    span.style.left = leftPct + '%';
+    span.style.minWidth = widthPct + '%';
+    span.style.fontSize = fontSizeFor(w, 15) + 'px';
+    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s`;
+    span.addEventListener('click', () => {
+      audio.currentTime = w.start;
+      audio.play();
+    });
+    rows[rowIdx].appendChild(span);
+    tlWordEls[i] = span;
+  });
+  setStatus(`${words.length} 語 / ${totalDur.toFixed(1)}s / 1行 ${windowSec}s × ${numRows}行`);
+}
+
+function formatTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function renderAll() {
+  if (!words.length) return;
+  renderFlow();
+  renderTimeline();
+  currentIdx = -1;
+  updateActive();
+}
+
+function render(data) {
+  words = data.words || [];
+  renderAll();
+}
+
+function updateActive() {
+  if (!words.length) return;
+  const t = audio.currentTime;
+  let lo = 0, hi = words.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (words[mid].start <= t && t < words[mid].end) { idx = mid; break; }
+    if (t < words[mid].start) hi = mid - 1;
+    else lo = mid + 1;
+  }
+  if (idx === currentIdx) return;
+  const prev = currentIdx;
+  currentIdx = idx;
+  const activeList = mode === 'flow' ? wordEls : tlWordEls;
+  if (prev >= 0 && activeList[prev]) activeList[prev].classList.remove('active');
+  if (idx >= 0 && activeList[idx]) {
+    activeList[idx].classList.add('active');
+    const rect = activeList[idx].getBoundingClientRect();
+    if (rect.top < 80 || rect.bottom > window.innerHeight - 40) {
+      activeList[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+}
+
+function switchMode(m) {
+  mode = m;
+  if (m === 'flow') {
+    btnFlow.classList.add('on'); btnTl.classList.remove('on');
+    flowEl.style.display = 'block'; timelineEl.style.display = 'none';
+    ctlGap.style.display = 'flex'; ctlWin.style.display = 'none';
+  } else {
+    btnFlow.classList.remove('on'); btnTl.classList.add('on');
+    flowEl.style.display = 'none'; timelineEl.style.display = 'block';
+    ctlGap.style.display = 'none'; ctlWin.style.display = 'flex';
+  }
+  // 再ハイライト
+  wordEls.forEach(e => e && e.classList.remove('active'));
+  tlWordEls.forEach(e => e && e.classList.remove('active'));
+  currentIdx = -1;
+  updateActive();
+  updatePlayhead();
+}
+
+btnFlow.addEventListener('click', () => switchMode('flow'));
+btnTl.addEventListener('click', () => switchMode('timeline'));
+gapRange.addEventListener('input', () => { gapVal.textContent = gapRange.value + 's'; renderFlow(); });
+winRange.addEventListener('input', () => { winVal.textContent = winRange.value + 's'; playhead = null; renderTimeline(); updatePlayhead(); });
+
+function updatePlayhead() {
+  if (mode !== 'timeline' || !words.length) {
+    if (playhead) playhead.style.display = 'none';
+    return;
+  }
+  const windowSec = parseFloat(winRange.value);
+  const t = audio.currentTime;
+  const rowIdx = Math.floor(t / windowSec);
+  const rows = timelineEl.querySelectorAll('.tl-row');
+  if (rowIdx >= rows.length) {
+    if (playhead) playhead.style.display = 'none';
+    return;
+  }
+  if (!playhead) {
+    playhead = document.createElement('div');
+    playhead.className = 'playhead';
+  }
+  const targetRow = rows[rowIdx];
+  if (playhead.parentElement !== targetRow) targetRow.appendChild(playhead);
+  const leftPct = ((t - rowIdx * windowSec) / windowSec) * 100;
+  playhead.style.left = leftPct + '%';
+  playhead.style.display = 'block';
+}
+
+function tick() {
+  updateActive();
+  updatePlayhead();
+  if (!audio.paused) rafId = requestAnimationFrame(tick);
+}
+
+audio.addEventListener('timeupdate', () => { updateActive(); updatePlayhead(); });
+audio.addEventListener('play', () => { cancelAnimationFrame(rafId); rafId = requestAnimationFrame(tick); });
+audio.addEventListener('pause', () => { cancelAnimationFrame(rafId); updatePlayhead(); });
+audio.addEventListener('seeked', updatePlayhead);
+
+async function handleFiles(files) {
+  for (const f of files) {
+    if (f.type.startsWith('audio/') || /\.(wav|mp3|m4a|flac|ogg)$/i.test(f.name)) {
+      audio.src = URL.createObjectURL(f);
+    } else if (f.name.endsWith('.json') || f.type === 'application/json') {
+      const text = await f.text();
+      try { render(JSON.parse(text)); drop.classList.add('hidden'); }
+      catch (e) { setStatus('JSON パース失敗: ' + e.message); }
+    }
+  }
+}
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+['dragenter', 'dragover'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hover'); })
+);
+['dragleave', 'drop'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hover'); })
+);
+drop.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); handleFiles(e.dataTransfer.files); });
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.code === 'Space') { e.preventDefault(); audio.paused ? audio.play() : audio.pause(); }
+  else if (e.code === 'ArrowLeft') { audio.currentTime = Math.max(0, audio.currentTime - 5); }
+  else if (e.code === 'ArrowRight') { audio.currentTime = Math.min(audio.duration, audio.currentTime + 5); }
+});
+</script>
+</body>
+</html>
