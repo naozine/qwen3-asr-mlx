@@ -51,3 +51,23 @@ uv run python transcribe.py sample.wav --language Japanese
 
 - WAV (16kHz モノラル推奨) が最速
 - MP3 等は ffmpeg でデコードされる
+
+## REST API (同期版)
+
+```bash
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+# http://localhost:8000/docs で OpenAPI ドキュメントを確認
+```
+
+curl例:
+
+```bash
+curl -X POST http://localhost:8000/transcribe \
+  -F "file=@test.wav" \
+  -F "language=Japanese" \
+  -F "context=Claude,MLX,Qwen"
+```
+
+- 起動時にモデルをロード (初回はDLで数分)
+- MLXモデルは内部でシリアル化 (複数リクエストは順次処理)
+- 長尺 (15分超) はタイムアウトに注意。本格的な長尺処理は将来の非同期ジョブ版で対応予定

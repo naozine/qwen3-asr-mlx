@@ -5,7 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.136.0",
     "mlx-audio>=0.4.2",
     "nagisa>=0.2.12",
+    "python-multipart>=0.0.26",
     "soundfile>=0.13.1",
+    "uvicorn[standard]>=0.44.0",
 ]

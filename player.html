@@ -56,6 +56,31 @@
   }
   .drop.hover { border-color: var(--active); background: #fffbe6; }
   .drop.hidden { display: none; }
+  .api-panel {
+    margin: 20px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    font-size: 13px;
+  }
+  .api-panel h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+  .api-panel .row {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .api-panel input[type="text"] {
+    flex: 1; min-width: 180px; padding: 5px 8px;
+    border: 1px solid var(--border); border-radius: 4px; font-size: 13px;
+  }
+  .api-panel label { color: var(--muted); white-space: nowrap; }
+  .api-panel button.primary {
+    background: var(--active); border-color: var(--active); color: #000; font-weight: 600;
+  }
+  .api-panel button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .api-status { color: var(--muted); }
+  .api-status.err { color: #d33; }
+  .api-status.ok { color: #2a9d3f; }
   audio { width: 100%; margin-top: 8px; }
   main { padding: 20px 24px 120px; }
 
@@ -150,8 +175,26 @@
 
 <div id="drop" class="drop">
   <p><strong>クリック</strong> または <strong>ドラッグ&ドロップ</strong><br>
-  音声 (.wav/.mp3) と result.json を読み込む</p>
+  音声 (.wav/.mp3) と result.json を読み込む。音声だけ入れてAPIで転写も可。</p>
   <input id="file" type="file" multiple accept="audio/*,application/json,.json" hidden>
+</div>
+
+<div class="api-panel">
+  <h3>APIで転写</h3>
+  <div class="row">
+    <label>URL</label>
+    <input id="api-url" type="text" value="http://localhost:8000/transcribe">
+  </div>
+  <div class="row">
+    <label>言語</label>
+    <input id="api-language" type="text" value="Japanese" style="flex:0 0 140px">
+    <label>コンテキスト</label>
+    <input id="api-context" type="text" placeholder="固有名詞・ホットワード (任意)">
+  </div>
+  <div class="row">
+    <button id="api-submit" class="primary" disabled>転写リクエスト</button>
+    <span id="api-status" class="api-status">音声ファイルを上でロードしてください</span>
+  </div>
 </div>
 
 <main>
@@ -182,6 +225,13 @@ let currentIdx = -1;
 let mode = 'flow';
 let playhead = null;
 let rafId = 0;
+let currentAudioFile = null;  // API送信用のFile参照
+
+const apiUrl = document.getElementById('api-url');
+const apiLanguage = document.getElementById('api-language');
+const apiContext = document.getElementById('api-context');
+const apiSubmit = document.getElementById('api-submit');
+const apiStatus = document.getElementById('api-status');
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -387,6 +437,9 @@ async function handleFiles(files) {
   for (const f of files) {
     if (f.type.startsWith('audio/') || /\.(wav|mp3|m4a|flac|ogg)$/i.test(f.name)) {
       audio.src = URL.createObjectURL(f);
+      currentAudioFile = f;
+      apiSubmit.disabled = false;
+      setApiStatus(`音声ロード: ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`);
     } else if (f.name.endsWith('.json') || f.type === 'application/json') {
       const text = await f.text();
       try { render(JSON.parse(text)); drop.classList.add('hidden'); }
@@ -394,6 +447,48 @@ async function handleFiles(files) {
     }
   }
 }
+
+function setApiStatus(msg, level = '') {
+  apiStatus.textContent = msg;
+  apiStatus.className = 'api-status' + (level ? ' ' + level : '');
+}
+
+async function submitToApi() {
+  if (!currentAudioFile) { setApiStatus('音声ファイルが未ロード', 'err'); return; }
+  const url = apiUrl.value.trim();
+  if (!url) { setApiStatus('URL が空', 'err'); return; }
+
+  const fd = new FormData();
+  fd.append('file', currentAudioFile);
+  fd.append('language', apiLanguage.value.trim() || 'Japanese');
+  const ctx = apiContext.value.trim();
+  if (ctx) fd.append('context', ctx);
+
+  apiSubmit.disabled = true;
+  setApiStatus('転写中... (長尺は数分かかります)');
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url, { method: 'POST', body: fd });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const wall = ((performance.now() - t0) / 1000).toFixed(1);
+    setApiStatus(
+      `完了 ${wall}s (ASR ${data.asr_seconds.toFixed(1)}s + Align ${data.align_seconds.toFixed(1)}s)`,
+      'ok'
+    );
+    render(data);
+    drop.classList.add('hidden');
+  } catch (e) {
+    setApiStatus('エラー: ' + e.message, 'err');
+  } finally {
+    apiSubmit.disabled = false;
+  }
+}
+
+apiSubmit.addEventListener('click', submitToApi);
 
 drop.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
