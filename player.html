@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Qwen3-ASR Transcript Player</title>
@@ -164,36 +164,36 @@
 <header>
   <audio id="audio" controls></audio>
   <div class="controls">
-    <button id="btn-flow" class="on">流れ</button>
-    <button id="btn-timeline">タイムライン</button>
-    <label id="ctl-gap">無音しきい値 <input id="gap-thresh" type="range" min="0.1" max="2" step="0.1" value="0.4"><span id="gap-val">0.4s</span></label>
-    <label id="ctl-window" style="display:none">1行 <input id="window-sec" type="range" min="4" max="20" step="1" value="8"><span id="window-val">8s</span></label>
-    <span class="hint"><kbd>Space</kbd> 再生/停止 <kbd>←</kbd>/<kbd>→</kbd> 5秒</span>
+    <button id="btn-flow" class="on">Flow</button>
+    <button id="btn-timeline">Timeline</button>
+    <label id="ctl-gap">Silence threshold <input id="gap-thresh" type="range" min="0.1" max="2" step="0.1" value="0.4"><span id="gap-val">0.4s</span></label>
+    <label id="ctl-window" style="display:none">Row span <input id="window-sec" type="range" min="4" max="20" step="1" value="8"><span id="window-val">8s</span></label>
+    <span class="hint"><kbd>Space</kbd> play/pause <kbd>←</kbd>/<kbd>→</kbd> skip 5s</span>
   </div>
-  <div class="meta"><span id="status">音声とJSONを読み込んでください</span></div>
+  <div class="meta"><span id="status">Load an audio file and a result.json to begin.</span></div>
 </header>
 
 <div id="drop" class="drop">
-  <p><strong>クリック</strong> または <strong>ドラッグ&ドロップ</strong><br>
-  音声 (.wav/.mp3) と result.json を読み込む。音声だけ入れてAPIで転写も可。</p>
+  <p><strong>Click</strong> or <strong>drag &amp; drop</strong><br>
+  an audio file (.wav/.mp3) and a result.json. Or drop audio alone and call the API below.</p>
   <input id="file" type="file" multiple accept="audio/*,application/json,.json" hidden>
 </div>
 
 <div class="api-panel">
-  <h3>APIで転写</h3>
+  <h3>Transcribe via API</h3>
   <div class="row">
     <label>URL</label>
     <input id="api-url" type="text" value="http://localhost:8000/transcribe">
   </div>
   <div class="row">
-    <label>言語</label>
+    <label>Language</label>
     <input id="api-language" type="text" value="Japanese" style="flex:0 0 140px">
-    <label>コンテキスト</label>
-    <input id="api-context" type="text" placeholder="固有名詞・ホットワード (任意)">
+    <label>Context</label>
+    <input id="api-context" type="text" placeholder="proper nouns / hotwords (optional)">
   </div>
   <div class="row">
-    <button id="api-submit" class="primary" disabled>転写リクエスト</button>
-    <span id="api-status" class="api-status">音声ファイルを上でロードしてください</span>
+    <button id="api-submit" class="primary" disabled>Send transcription request</button>
+    <span id="api-status" class="api-status">Load an audio file above first.</span>
   </div>
 </div>
 
@@ -225,7 +225,7 @@ let currentIdx = -1;
 let mode = 'flow';
 let playhead = null;
 let rafId = 0;
-let currentAudioFile = null;  // API送信用のFile参照
+let currentAudioFile = null;  // File reference kept around for API submission
 
 const apiUrl = document.getElementById('api-url');
 const apiLanguage = document.getElementById('api-language');
@@ -235,7 +235,7 @@ const apiStatus = document.getElementById('api-status');
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
-// 話速 (sec/char) に応じたフォントサイズ。小さすぎ/大きすぎはクランプ
+// Font size scales with speaking rate (sec/char), clamped so nothing gets unreadable.
 const FONT_MIN_PX = 9;
 const FONT_MAX_PX = 13;
 function fontSizeFor(word, baseSize = 12) {
@@ -258,7 +258,7 @@ function renderFlow() {
       const gap = w.start - prev.end;
       if (gap >= gapThresh) {
         const gapEl = document.createElement('span');
-        // gapの長さを視覚化: 幅を時間に比例 (上限200px)
+        // Visualize the silence gap: width proportional to duration (capped at 200px).
         const width = Math.min(200, gap * 40);
         const isLong = gap >= 1.0;
         gapEl.className = 'gap' + (isLong ? ' line-break' : '');
@@ -267,7 +267,7 @@ function renderFlow() {
         } else {
           gapEl.style.width = width + 'px';
         }
-        gapEl.title = `無音 ${gap.toFixed(2)}s`;
+        gapEl.title = `silence ${gap.toFixed(2)}s`;
         flowEl.appendChild(gapEl);
       }
     }
@@ -276,7 +276,7 @@ function renderFlow() {
     span.textContent = w.text;
     span.dataset.idx = i;
     span.style.fontSize = fontSizeFor(w, baseSize) + 'px';
-    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s (${w.text.length}字/${(w.end - w.start).toFixed(2)}s)`;
+    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s (${w.text.length} chars / ${(w.end - w.start).toFixed(2)}s)`;
     span.addEventListener('click', () => {
       audio.currentTime = w.start;
       audio.play();
@@ -284,7 +284,7 @@ function renderFlow() {
     flowEl.appendChild(span);
     wordEls.push(span);
   });
-  setStatus(`${words.length} 語 / ${totalDur.toFixed(1)}s`);
+  setStatus(`${words.length} words / ${totalDur.toFixed(1)}s`);
 }
 
 function renderTimeline() {
@@ -328,7 +328,7 @@ function renderTimeline() {
     rows[rowIdx].appendChild(span);
     tlWordEls[i] = span;
   });
-  setStatus(`${words.length} 語 / ${totalDur.toFixed(1)}s / 1行 ${windowSec}s × ${numRows}行`);
+  setStatus(`${words.length} words / ${totalDur.toFixed(1)}s / ${windowSec}s per row × ${numRows} rows`);
 }
 
 function formatTime(s) {
@@ -385,7 +385,7 @@ function switchMode(m) {
     flowEl.style.display = 'none'; timelineEl.style.display = 'block';
     ctlGap.style.display = 'none'; ctlWin.style.display = 'flex';
   }
-  // 再ハイライト
+  // Re-apply active word highlight in the newly visible view.
   wordEls.forEach(e => e && e.classList.remove('active'));
   tlWordEls.forEach(e => e && e.classList.remove('active'));
   currentIdx = -1;
@@ -439,11 +439,11 @@ async function handleFiles(files) {
       audio.src = URL.createObjectURL(f);
       currentAudioFile = f;
       apiSubmit.disabled = false;
-      setApiStatus(`音声ロード: ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`);
+      setApiStatus(`Audio loaded: ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`);
     } else if (f.name.endsWith('.json') || f.type === 'application/json') {
       const text = await f.text();
       try { render(JSON.parse(text)); drop.classList.add('hidden'); }
-      catch (e) { setStatus('JSON パース失敗: ' + e.message); }
+      catch (e) { setStatus('JSON parse failed: ' + e.message); }
     }
   }
 }
@@ -454,9 +454,9 @@ function setApiStatus(msg, level = '') {
 }
 
 async function submitToApi() {
-  if (!currentAudioFile) { setApiStatus('音声ファイルが未ロード', 'err'); return; }
+  if (!currentAudioFile) { setApiStatus('No audio file loaded.', 'err'); return; }
   const url = apiUrl.value.trim();
-  if (!url) { setApiStatus('URL が空', 'err'); return; }
+  if (!url) { setApiStatus('URL is empty.', 'err'); return; }
 
   const fd = new FormData();
   fd.append('file', currentAudioFile);
@@ -465,7 +465,7 @@ async function submitToApi() {
   if (ctx) fd.append('context', ctx);
 
   apiSubmit.disabled = true;
-  setApiStatus('転写中... (長尺は数分かかります)');
+  setApiStatus('Transcribing... (long audio may take several minutes)');
   const t0 = performance.now();
   try {
     const res = await fetch(url, { method: 'POST', body: fd });
@@ -476,13 +476,13 @@ async function submitToApi() {
     const data = await res.json();
     const wall = ((performance.now() - t0) / 1000).toFixed(1);
     setApiStatus(
-      `完了 ${wall}s (ASR ${data.asr_seconds.toFixed(1)}s + Align ${data.align_seconds.toFixed(1)}s)`,
+      `Done in ${wall}s (ASR ${data.asr_seconds.toFixed(1)}s + Align ${data.align_seconds.toFixed(1)}s)`,
       'ok'
     );
     render(data);
     drop.classList.add('hidden');
   } catch (e) {
-    setApiStatus('エラー: ' + e.message, 'err');
+    setApiStatus('Error: ' + e.message, 'err');
   } finally {
     apiSubmit.disabled = false;
   }

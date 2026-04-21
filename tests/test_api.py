@@ -1,7 +1,8 @@
-"""FastAPI エンドポイントのスモークテスト。
+"""Smoke tests for the FastAPI endpoints.
 
-モデルのロード・実際の推論はモック化し、APIの形状だけ検証する。
-本物のモデルを使う統合テストは時間とディスクを大量に消費するため対象外。
+Model loading and inference are mocked — we only validate the API shape.
+Real-model integration tests are intentionally out of scope: they consume
+significant time and disk (weights download).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ def client(monkeypatch):
     import api
     import transcriber
 
-    # モデルロードを no-op に (テストで HuggingFace からDLしない)
+    # No-op model loading so tests never hit the Hugging Face Hub.
     monkeypatch.setattr(transcriber, "load_models", lambda: None)
     monkeypatch.setattr(api, "load_models", lambda: None)
 

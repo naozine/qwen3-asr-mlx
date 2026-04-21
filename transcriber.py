@@ -1,4 +1,4 @@
-"""Qwen3-ASR + ForcedAligner の共有ロジック。CLI/APIから利用。"""
+"""Shared transcription logic used by both the CLI and the REST API."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class TranscriptionResult:
 
 
 def load_models() -> None:
-    """ASRとAlignerをロード。すでにロード済みなら何もしない。"""
+    """Load ASR and aligner models. No-op if already loaded."""
     global _asr, _aligner
     with _lock:
         if _asr is None:
@@ -48,9 +48,10 @@ def transcribe(
     language: str = "Japanese",
     context: Optional[str] = None,
 ) -> TranscriptionResult:
-    """音声ファイルを転写しタイムスタンプを付与。
+    """Transcribe an audio file and attach word-level timestamps.
 
-    MLXモデルはスレッドセーフでない前提で全体をロックし直列化。
+    MLX models are treated as non-thread-safe, so the whole pipeline is
+    serialized under a single lock.
     """
     import time
 
