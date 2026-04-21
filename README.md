@@ -1,73 +1,141 @@
-# qwen3-asr-test
+# Qwen3-ASR × MLX Transcript Player
 
-Apple Silicon (M4) 上で **Qwen3-ASR-1.7B (bf16)** + **Qwen3-ForcedAligner-0.6B (8bit)** を MLX で動かし、転写と単語タイムスタンプを取得する最小構成。
+Apple Silicon で **Qwen3-ASR-1.7B (bf16)** を動かし、単語タイムスタンプ付きの転写をブラウザ上で可視化する最小構成。CLI / REST API / ブラウザUI の3つのインターフェースから叩ける。
 
-## 構成
+<!-- ![demo](docs/demo.gif) -->
 
-| 用途 | モデル | サイズ |
+## Why
+- **精度優先**: Whisper large-v3 を多くのベンチで上回る Qwen3-ASR を bf16 で動かす (量子化なし)
+- **Apple Silicon で完結**: MLX 経由で M系Mac のGPU/Neural Engineを活用。PyTorch比 3〜4倍の速度
+- **時間情報**: 転写だけでは用途が限られるので、`Qwen3-ForcedAligner-0.6B` で単語単位のタイムスタンプを付与
+- **ローカル完結**: クラウドAPIに投げない。プライベートな会話・会議録音をそのまま扱える
+
+## アーキテクチャ
+
+```
+  ┌──────────┐        ┌────────────────────────┐
+  │  audio   │──┐     │ mlx-audio (MLX)        │
+  │ (wav/..) │  ├───▶ │  Qwen3-ASR-1.7B-bf16   │──▶ transcript
+  └──────────┘  │     └────────────────────────┘
+                │     ┌────────────────────────┐
+                └───▶ │ Qwen3-ForcedAligner    │──▶ word timestamps
+                      │  0.6B-8bit             │
+                      └────────────────────────┘
+                                 │
+                     ┌───────────┴────────────┐
+                     ▼                        ▼
+            ┌─────────────────┐     ┌──────────────────┐
+            │  CLI (JSON出力)  │     │  FastAPI server  │
+            └─────────────────┘     └────────┬─────────┘
+                                             ▼
+                                    ┌──────────────────┐
+                                    │  player.html     │
+                                    │  (timeline UI)   │
+                                    └──────────────────┘
+```
+
+## 使用モデル
+
+| モデル | ライセンス | 用途 |
 | --- | --- | --- |
-| 転写 (精度優先) | `mlx-community/Qwen3-ASR-1.7B-bf16` | 約 4.08 GB |
-| タイムスタンプ | `mlx-community/Qwen3-ForcedAligner-0.6B-8bit` | 約 0.7 GB |
+| [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) → [mlx-community/Qwen3-ASR-1.7B-bf16](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16) | Apache-2.0 | 音声認識 (多言語) |
+| [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B) → [mlx-community/Qwen3-ForcedAligner-0.6B-8bit](https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-8bit) | Apache-2.0 | 単語タイムスタンプ付与 |
 
-## セットアップ
+MLX移植版は [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio) を利用。
+
+## 動作要件
+
+- Apple Silicon Mac (M1/M2/M3/M4 系)
+- Python ≥3.12 (`uv` 推奨)
+- `ffmpeg` (WAV以外を扱う場合)
+- 初回は約 **4.8 GB** のモデルダウンロードあり (`~/.cache/huggingface/`)
+
+## Quick Start
 
 ```bash
+git clone <this-repo> && cd <this-repo>
 uv sync
-# ffmpeg は既にインストール済み想定 (WAV以外を扱う場合に必要)
 ```
 
-## 使い方
+### 1. CLI でワンショット
 
 ```bash
-uv run python transcribe.py sample.wav --language Japanese
+uv run python transcribe.py path/to/audio.wav --language Japanese
+# → result.json に単語タイムスタンプ付きJSONを出力
 ```
 
-オプション:
+### 2. REST API サーバ
 
-- `--language`: `Japanese` / `English` / `Chinese` / `Korean` など (ForcedAligner 用)
-- `--context`: 固有名詞・専門用語などのホットワードを渡すと ASR の精度が上がる
-- `--output`: JSON 出力先 (デフォルト `result.json`)
+```bash
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+# http://localhost:8000/docs で OpenAPI を確認
+```
 
-## 出力例
+curl 例:
+```bash
+curl -X POST http://localhost:8000/transcribe \
+  -F "file=@audio.wav" \
+  -F "language=Japanese" \
+  -F "context=固有名詞,業界用語"
+```
+
+### 3. ブラウザUI (`player.html`)
+
+`player.html` をダブルクリックで開く。選択肢:
+
+- **JSON読み込み**: CLIで生成した `result.json` と音声ファイルをドラッグ&ドロップ
+- **API経由で転写**: 音声ファイルをドロップ → 「APIで転写」ボタン
+
+#### UI機能
+- 2ビュー切替: **流れ** (無音可視化+段落化) / **タイムライン** (時間軸絶対配置)
+- 話速に応じたフォントサイズ (早口は小さく)
+- 単語クリックでシーク、再生中の単語ハイライト、再生ヘッド表示
+- `Space` 再生/停止、`←`/`→` 5秒送り
+
+## CLI オプション
+
+| オプション | 説明 |
+| --- | --- |
+| `--language` | ForcedAligner の言語名 (`Japanese` / `English` / `Chinese` / `Korean` ほか) |
+| `--context` | 固有名詞・専門用語を事前注入して精度向上 (ASR hotword) |
+| `--output` | 出力JSONパス (default: `result.json`) |
+
+## API レスポンス例
 
 ```json
 {
   "text": "今日はいい天気ですね。",
-  "language": "ja",
+  "language": "Japanese",
   "words": [
     {"text": "今日", "start": 0.12, "end": 0.45},
     {"text": "は",   "start": 0.45, "end": 0.58}
-  ]
+  ],
+  "asr_seconds": 3.2,
+  "align_seconds": 1.1
 }
 ```
 
-## 初回実行時の注意
+## 既知の制約
 
-- モデル初回ロード時に Hugging Face から約 4.8 GB をダウンロード (`~/.cache/huggingface/`)
-- ForcedAligner は最大 **5 分** の音声まで。長尺は事前にチャンク分割推奨
-- ストリーミング転写はタイムスタンプ非対応
+- **ForcedAligner は 5分以内の音声**対象。長尺対応は自前でチャンク分割+連結が必要 (TODO)
+- **同期API のみ**。15分を超える音声は HTTP タイムアウトに注意
+- **CORS は `*` で開放**。ローカル/LAN用途前提。外部公開時はオリジン制限を
+- 並列リクエストは内部でシリアル化される (MLXモデルはスレッドセーフでない前提)
 
-## 音声フォーマット
+## ロードマップ
 
-- WAV (16kHz モノラル推奨) が最速
-- MP3 等は ffmpeg でデコードされる
+- [ ] ForcedAligner 5分制約を吸収する長尺チャンクパイプライン
+- [ ] 非同期ジョブAPI (`/jobs/{id}/status`)
+- [ ] pytest によるスモークテスト
+- [ ] Whisper との精度比較スクリプト
 
-## REST API (同期版)
+## Thanks
 
-```bash
-uv run uvicorn api:app --host 0.0.0.0 --port 8000
-# http://localhost:8000/docs で OpenAPI ドキュメントを確認
-```
+- Alibaba Qwen team — Qwen3-ASR / Qwen3-ForcedAligner
+- Apple — MLX
+- Prince Canuma ([@Blaizzy](https://github.com/Blaizzy)) — mlx-audio
+- mlx-community — MLX量子化・bf16変換モデルの提供
 
-curl例:
+## License
 
-```bash
-curl -X POST http://localhost:8000/transcribe \
-  -F "file=@test.wav" \
-  -F "language=Japanese" \
-  -F "context=Claude,MLX,Qwen"
-```
-
-- 起動時にモデルをロード (初回はDLで数分)
-- MLXモデルは内部でシリアル化 (複数リクエストは順次処理)
-- 長尺 (15分超) はタイムアウトに注意。本格的な長尺処理は将来の非同期ジョブ版で対応予定
+MIT — [LICENSE](LICENSE) 参照。なお使用するモデル (Qwen3-ASR / Qwen3-ForcedAligner) は Apache-2.0 ライセンスで配布されており、利用時はそちらの条項にも従ってください。
