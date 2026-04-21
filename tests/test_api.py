@@ -29,8 +29,8 @@ def test_health_returns_ok(client):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert "Qwen3-ASR" in body["asr_model"]
-    assert "ForcedAligner" in body["aligner_model"]
+    assert body["backend"] in {"qwen3", "whisper"}
+    assert body["asr_model"]  # non-empty
 
 
 def test_transcribe_missing_file_returns_422(client):

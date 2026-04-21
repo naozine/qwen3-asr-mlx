@@ -15,6 +15,7 @@ wheels/
 *.m4a
 *.flac
 result.json
+result_*.json
 
 # IDE
 .idea/
