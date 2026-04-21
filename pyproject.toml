@@ -31,3 +31,14 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/naozine/qwen3-asr-mlx"
 Issues = "https://github.com/naozine/qwen3-asr-mlx/issues"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -q"

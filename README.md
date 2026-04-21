@@ -122,12 +122,20 @@ curl -X POST http://localhost:8000/transcribe \
 - **CORS は `*` で開放**。ローカル/LAN用途前提。外部公開時はオリジン制限を
 - 並列リクエストは内部でシリアル化される (MLXモデルはスレッドセーフでない前提)
 
+## テスト
+
+```bash
+uv run pytest
+```
+
+モデルロード・推論はモック化した API スモークテスト (`tests/test_api.py`) を同梱。実モデルによる統合テストは対象外 (手動)。
+
 ## ロードマップ
 
 - [ ] ForcedAligner 5分制約を吸収する長尺チャンクパイプライン
 - [ ] 非同期ジョブAPI (`/jobs/{id}/status`)
-- [ ] pytest によるスモークテスト
 - [ ] Whisper との精度比較スクリプト
+- [ ] GitHub Actions (lint / test)
 
 ## Thanks
 
