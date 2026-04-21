@@ -1,9 +1,24 @@
 [project]
-name = "qwen3-asr-test"
+name = "qwen3-asr-mlx"
 version = "0.1.0"
-description = "Add your description here"
+description = "Qwen3-ASR + ForcedAligner on MLX for Apple Silicon — 単語タイムスタンプ付き転写 (CLI / REST API / ブラウザUI)"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "naozine", email = "naozine@outlook.jp" },
+]
+keywords = [
+    "asr",
+    "speech-to-text",
+    "transcription",
+    "mlx",
+    "apple-silicon",
+    "qwen",
+    "qwen3",
+    "forced-alignment",
+    "japanese",
+]
 dependencies = [
     "fastapi>=0.136.0",
     "mlx-audio>=0.4.2",
@@ -12,3 +27,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "uvicorn[standard]>=0.44.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/naozine/qwen3-asr-mlx"
+Issues = "https://github.com/naozine/qwen3-asr-mlx/issues"
