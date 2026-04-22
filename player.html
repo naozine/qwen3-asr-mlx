@@ -182,8 +182,8 @@
 <div class="api-panel">
   <h3>Transcribe via API</h3>
   <div class="row">
-    <label>URL</label>
-    <input id="api-url" type="text" value="http://localhost:8000/transcribe">
+    <label>Base URL</label>
+    <input id="api-url" type="text" value="http://localhost:8000">
   </div>
   <div class="row">
     <label>Language</label>
@@ -192,8 +192,18 @@
     <input id="api-context" type="text" placeholder="proper nouns / hotwords (optional)">
   </div>
   <div class="row">
+    <label><input id="api-stream" type="checkbox" checked> Stream (chunk-by-chunk)</label>
+    <label>Chunk seconds <input id="api-chunk" type="number" min="10" max="600" step="10" value="60" style="width:70px"></label>
+  </div>
+  <div class="row">
     <button id="api-submit" class="primary" disabled>Send transcription request</button>
+    <button id="api-cancel" style="display:none">Cancel</button>
     <span id="api-status" class="api-status">Load an audio file above first.</span>
+  </div>
+  <div id="api-progress-wrap" style="display:none; margin-top:8px">
+    <div style="height:6px; background:#eee; border-radius:3px; overflow:hidden">
+      <div id="api-progress-bar" style="height:100%; width:0; background:var(--active); transition:width 0.2s"></div>
+    </div>
   </div>
 </div>
 
@@ -231,7 +241,13 @@ const apiUrl = document.getElementById('api-url');
 const apiLanguage = document.getElementById('api-language');
 const apiContext = document.getElementById('api-context');
 const apiSubmit = document.getElementById('api-submit');
+const apiCancel = document.getElementById('api-cancel');
 const apiStatus = document.getElementById('api-status');
+const apiStream = document.getElementById('api-stream');
+const apiChunk = document.getElementById('api-chunk');
+const apiProgressWrap = document.getElementById('api-progress-wrap');
+const apiProgressBar = document.getElementById('api-progress-bar');
+let activeAbort = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -453,38 +469,145 @@ function setApiStatus(msg, level = '') {
   apiStatus.className = 'api-status' + (level ? ' ' + level : '');
 }
 
-async function submitToApi() {
-  if (!currentAudioFile) { setApiStatus('No audio file loaded.', 'err'); return; }
-  const url = apiUrl.value.trim();
-  if (!url) { setApiStatus('URL is empty.', 'err'); return; }
-
+function buildFormData() {
   const fd = new FormData();
   fd.append('file', currentAudioFile);
   fd.append('language', apiLanguage.value.trim() || 'Japanese');
   const ctx = apiContext.value.trim();
   if (ctx) fd.append('context', ctx);
+  return fd;
+}
 
+function apiBase() {
+  return apiUrl.value.trim().replace(/\/$/, '');
+}
+
+function setProgress(frac) {
+  if (frac === null) {
+    apiProgressWrap.style.display = 'none';
+    return;
+  }
+  apiProgressWrap.style.display = 'block';
+  apiProgressBar.style.width = Math.min(100, Math.max(0, frac * 100)) + '%';
+}
+
+function beginRequest() {
   apiSubmit.disabled = true;
-  setApiStatus('Transcribing... (long audio may take several minutes)');
+  apiCancel.style.display = '';
+  activeAbort = new AbortController();
+}
+
+function endRequest() {
+  apiSubmit.disabled = false;
+  apiCancel.style.display = 'none';
+  activeAbort = null;
+}
+
+apiCancel.addEventListener('click', () => {
+  if (activeAbort) activeAbort.abort();
+});
+
+async function submitOneShot() {
+  const url = apiBase() + '/transcribe';
+  setApiStatus('Transcribing... (this can take several minutes for long audio)');
+  setProgress(null);
   const t0 = performance.now();
-  try {
-    const res = await fetch(url, { method: 'POST', body: fd });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+  const res = await fetch(url, { method: 'POST', body: buildFormData(), signal: activeAbort.signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  const wall = ((performance.now() - t0) / 1000).toFixed(1);
+  setApiStatus(
+    `Done in ${wall}s (ASR ${data.asr_seconds.toFixed(1)}s + Align ${data.align_seconds.toFixed(1)}s)`,
+    'ok'
+  );
+  render(data);
+  drop.classList.add('hidden');
+}
+
+// Parse an SSE stream, calling onEvent({event, data}) for each frame.
+async function* parseSSE(reader) {
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      let ev = 'message';
+      const dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      if (dataLines.length === 0) continue;
+      let payload;
+      try { payload = JSON.parse(dataLines.join('\n')); }
+      catch { payload = dataLines.join('\n'); }
+      yield { event: ev, data: payload };
     }
-    const data = await res.json();
-    const wall = ((performance.now() - t0) / 1000).toFixed(1);
-    setApiStatus(
-      `Done in ${wall}s (ASR ${data.asr_seconds.toFixed(1)}s + Align ${data.align_seconds.toFixed(1)}s)`,
-      'ok'
-    );
-    render(data);
-    drop.classList.add('hidden');
+  }
+}
+
+async function submitStreaming() {
+  const url = apiBase() + '/transcribe-stream';
+  const fd = buildFormData();
+  fd.append('chunk_duration', String(parseFloat(apiChunk.value) || 60));
+  setApiStatus('Connecting...');
+  setProgress(0);
+  words = [];
+  renderAll();
+
+  const t0 = performance.now();
+  const res = await fetch(url, { method: 'POST', body: fd, signal: activeAbort.signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+
+  let total = 0;
+  let processed = 0;
+  let backend = '';
+  let chunkCount = 0;
+  for await (const { event, data } of parseSSE(res.body.getReader())) {
+    if (event === 'start') {
+      total = data.total_duration || 0;
+      chunkCount = data.chunk_count || 0;
+      backend = data.backend || '';
+      setApiStatus(`Streaming from ${backend} (${chunkCount} chunks, ${total.toFixed(1)}s total)...`);
+      drop.classList.add('hidden');
+    } else if (event === 'chunk') {
+      words = words.concat(data.words || []);
+      renderAll();
+      processed = (data.chunk_start || 0) + (data.chunk_duration || 0);
+      setProgress(total > 0 ? processed / total : 0);
+      setApiStatus(`Chunk ${data.chunk_index + 1}/${chunkCount} @ ${processed.toFixed(1)}s / ${total.toFixed(1)}s`);
+    } else if (event === 'done') {
+      const wall = ((performance.now() - t0) / 1000).toFixed(1);
+      setApiStatus(`Done in ${wall}s (ASR ${data.total_asr_seconds.toFixed(1)}s)`, 'ok');
+      setProgress(1);
+    } else if (event === 'error') {
+      throw new Error(data.message || 'stream error');
+    }
+  }
+}
+
+async function submitToApi() {
+  if (!currentAudioFile) { setApiStatus('No audio file loaded.', 'err'); return; }
+  const url = apiUrl.value.trim();
+  if (!url) { setApiStatus('Base URL is empty.', 'err'); return; }
+
+  beginRequest();
+  try {
+    if (apiStream.checked) {
+      await submitStreaming();
+    } else {
+      await submitOneShot();
+    }
   } catch (e) {
-    setApiStatus('Error: ' + e.message, 'err');
+    if (e.name === 'AbortError') setApiStatus('Cancelled.', 'err');
+    else setApiStatus('Error: ' + e.message, 'err');
   } finally {
-    apiSubmit.disabled = false;
+    endRequest();
   }
 }
 

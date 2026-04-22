@@ -10,11 +10,15 @@ Select the backend with the ``ASR_BACKEND`` environment variable:
 
 Endpoints:
     GET  /health
-    POST /transcribe  (multipart: file, language, context)
+    POST /transcribe         (multipart: file, language, context)
+    POST /transcribe-stream  (multipart: file, language, context, chunk_duration)
+                             Streams SSE events ("start", "chunk", "done", "error")
+                             as each fixed-duration chunk finishes processing.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -25,8 +29,10 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from chunker import AudioChunks
 from transcriber import TranscriptionResult
 
 ASR_BACKEND = os.environ.get("ASR_BACKEND", "qwen3").lower()
@@ -134,4 +140,105 @@ async def transcribe_endpoint(
         words=[WordOut(**asdict(w)) for w in result.words],
         asr_seconds=result.asr_seconds,
         align_seconds=result.align_seconds,
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    """Format a single Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/transcribe-stream")
+async def transcribe_stream_endpoint(
+    file: UploadFile = File(..., description="Audio file (wav/mp3/m4a/flac)"),
+    language: str = Form("Japanese"),
+    context: Optional[str] = Form(None),
+    chunk_duration: float = Form(60.0, description="Seconds per chunk"),
+) -> StreamingResponse:
+    suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        upload_path = Path(tmp.name)
+        tmp.write(await file.read())
+
+    async def event_gen():
+        ac: AudioChunks | None = None
+        try:
+            ac = await run_in_threadpool(
+                lambda: AudioChunks(upload_path, chunk_duration=chunk_duration).__enter__()
+            )
+            yield _sse(
+                "start",
+                {
+                    "total_duration": ac.total_duration,
+                    "chunk_duration": chunk_duration,
+                    "chunk_count": len(ac.chunks),
+                    "backend": ASR_BACKEND,
+                    "asr_model": ASR_MODEL_ID,
+                },
+            )
+
+            total_asr = 0.0
+            total_align = 0.0
+            total_words = 0
+            accumulated_text = []
+
+            for idx, (offset, chunk_path) in enumerate(ac.chunks):
+                try:
+                    result: TranscriptionResult = await run_in_threadpool(
+                        transcribe, chunk_path, language, context
+                    )
+                except Exception as exc:
+                    yield _sse("error", {"chunk_index": idx, "message": str(exc)})
+                    return
+
+                words_out = [
+                    {
+                        "text": w.text,
+                        "start": w.start + offset,
+                        "end": w.end + offset,
+                    }
+                    for w in result.words
+                ]
+                accumulated_text.append(result.text)
+                total_asr += result.asr_seconds
+                total_align += result.align_seconds
+                total_words += len(words_out)
+
+                yield _sse(
+                    "chunk",
+                    {
+                        "chunk_index": idx,
+                        "chunk_start": offset,
+                        "chunk_duration": min(chunk_duration, ac.total_duration - offset),
+                        "text": result.text,
+                        "words": words_out,
+                        "asr_seconds": result.asr_seconds,
+                        "align_seconds": result.align_seconds,
+                    },
+                )
+
+            yield _sse(
+                "done",
+                {
+                    "text": "".join(accumulated_text).strip(),
+                    "total_words": total_words,
+                    "total_asr_seconds": total_asr,
+                    "total_align_seconds": total_align,
+                },
+            )
+        except Exception as exc:
+            yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if ac is not None:
+                await run_in_threadpool(lambda: ac.__exit__(None, None, None))
+            upload_path.unlink(missing_ok=True)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
