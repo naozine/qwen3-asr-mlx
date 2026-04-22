@@ -96,6 +96,8 @@
   }
   #flow .word:hover { background: var(--accent); }
   #flow .word.active { background: var(--active); color: #000; }
+  #flow .word.interim { opacity: 0.55; font-style: italic; }
+  .tl-word.interim { opacity: 0.55; font-style: italic; }
   #flow .gap {
     display: inline-block;
     height: 0.6em;
@@ -206,6 +208,10 @@
     <label><input id="api-follow" type="checkbox"> Live (follow growing file)</label>
     <label id="api-idle-wrap" style="display:none">Idle timeout <input id="api-idle" type="number" min="2" max="120" step="1" value="15" style="width:60px">s</label>
   </div>
+  <div class="row" id="api-revise-wrap" style="display:none">
+    <label>Interim &lt; <input id="api-interim" type="number" min="2" max="60" step="1" value="10" style="width:55px">s</label>
+    <label>Consolidate every <input id="api-consolidate" type="number" min="15" max="300" step="5" value="60" style="width:60px">s</label>
+  </div>
   <div class="row">
     <button id="api-submit" class="primary" disabled>Send transcription request</button>
     <button id="api-cancel" style="display:none">Cancel</button>
@@ -263,9 +269,13 @@ const apiSourceRadios = document.getElementsByName('api-src');
 const apiFollow = document.getElementById('api-follow');
 const apiIdle = document.getElementById('api-idle');
 const apiIdleWrap = document.getElementById('api-idle-wrap');
+const apiInterim = document.getElementById('api-interim');
+const apiConsolidate = document.getElementById('api-consolidate');
+const apiReviseWrap = document.getElementById('api-revise-wrap');
 
 apiFollow.addEventListener('change', () => {
   apiIdleWrap.style.display = apiFollow.checked ? '' : 'none';
+  apiReviseWrap.style.display = apiFollow.checked ? 'flex' : 'none';
 });
 
 let serverAudioRoot = null;
@@ -370,11 +380,11 @@ function renderFlow() {
       }
     }
     const span = document.createElement('span');
-    span.className = 'word';
+    span.className = 'word' + (w.interim ? ' interim' : '');
     span.textContent = w.text;
     span.dataset.idx = i;
     span.style.fontSize = fontSizeFor(w, baseSize) + 'px';
-    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s (${w.text.length} chars / ${(w.end - w.start).toFixed(2)}s)`;
+    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s (${w.text.length} chars / ${(w.end - w.start).toFixed(2)}s)` + (w.interim ? ' [interim]' : '');
     span.addEventListener('click', () => {
       audio.currentTime = w.start;
       audio.play();
@@ -413,12 +423,12 @@ function renderTimeline() {
     const leftPct = ((w.start - rowStart) / windowSec) * 100;
     const widthPct = Math.max(0.5, ((w.end - w.start) / windowSec) * 100);
     const span = document.createElement('span');
-    span.className = 'tl-word';
+    span.className = 'tl-word' + (w.interim ? ' interim' : '');
     span.textContent = w.text;
     span.style.left = leftPct + '%';
     span.style.minWidth = widthPct + '%';
     span.style.fontSize = fontSizeFor(w, 15) + 'px';
-    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s`;
+    span.title = `${w.start.toFixed(2)}s – ${w.end.toFixed(2)}s` + (w.interim ? ' [interim]' : '');
     span.addEventListener('click', () => {
       audio.currentTime = w.start;
       audio.play();
@@ -637,6 +647,15 @@ async function* parseSSE(reader) {
   }
 }
 
+// chunk_id -> {start, end, words, interim}. Source of truth during streaming.
+let chunkMap = new Map();
+
+function rebuildWordsFromChunks() {
+  const entries = Array.from(chunkMap.values()).sort((a, b) => a.start - b.start);
+  words = entries.flatMap(e => e.words.map(w => e.interim ? { ...w, interim: true } : w));
+  renderAll();
+}
+
 async function submitStreaming() {
   const url = apiBase() + '/transcribe-stream';
   const fd = buildFormData();
@@ -644,11 +663,14 @@ async function submitStreaming() {
   const isFollow = apiFollow.checked && apiSourceMode() === 'path';
   if (isFollow) {
     fd.append('follow', 'true');
-    fd.append('idle_timeout_seconds', String(parseFloat(apiIdle.value) || 8));
+    fd.append('idle_timeout_seconds', String(parseFloat(apiIdle.value) || 15));
+    fd.append('interim_threshold_seconds', String(parseFloat(apiInterim.value) || 10));
+    fd.append('consolidation_window_seconds', String(parseFloat(apiConsolidate.value) || 60));
   }
   setApiStatus('Connecting...');
   if (isFollow) setProgress(null); else setProgress(0);
   words = [];
+  chunkMap = new Map();
   renderAll();
 
   const t0 = performance.now();
@@ -676,18 +698,34 @@ async function submitStreaming() {
       }
       drop.classList.add('hidden');
     } else if (event === 'chunk') {
-      words = words.concat(data.words || []);
-      renderAll();
+      // Remove any chunks that this one revises
+      const revises = data.revises || [];
+      for (const id of revises) chunkMap.delete(id);
+      // Insert/replace the new chunk
+      if (data.chunk_id) {
+        chunkMap.set(data.chunk_id, {
+          start: data.chunk_start || 0,
+          end: (data.chunk_start || 0) + (data.chunk_duration || 0),
+          words: data.words || [],
+          interim: !!data.interim,
+        });
+        rebuildWordsFromChunks();
+      } else {
+        // fallback for pre-revise schema
+        words = words.concat(data.words || []);
+        renderAll();
+      }
       chunkIdx += 1;
       processed = (data.chunk_start || 0) + (data.chunk_duration || 0);
+      const reviseNote = revises.length ? ` (revised ${revises.length})` : (data.interim ? ' [interim]' : '');
       if (followMode) {
         const wall = ((performance.now() - t0) / 1000).toFixed(0);
-        setApiStatus(`LIVE: ${chunkIdx} chunks, processed up to ${processed.toFixed(1)}s (wall ${wall}s)`);
+        setApiStatus(`LIVE: ${chunkIdx} events, up to ${processed.toFixed(1)}s (wall ${wall}s)${reviseNote}`);
       } else if (chunkCount) {
         setProgress(total > 0 ? processed / total : 0);
         setApiStatus(`Chunk ${chunkIdx}/${chunkCount} @ ${processed.toFixed(1)}s / ${total.toFixed(1)}s`);
       } else {
-        setApiStatus(`Chunk ${chunkIdx} @ ${processed.toFixed(1)}s`);
+        setApiStatus(`Chunk ${chunkIdx} @ ${processed.toFixed(1)}s${reviseNote}`);
       }
     } else if (event === 'done') {
       const wall = ((performance.now() - t0) / 1000).toFixed(1);

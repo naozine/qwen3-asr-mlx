@@ -71,23 +71,29 @@ def decode_from_offset(src: str | Path, offset_sec: float) -> np.ndarray:
     is essential for the ``follow=true`` streaming mode where the file is
     still being written.
     """
-    if offset_sec <= 0:
-        args_ss: list[str] = []
-    else:
-        args_ss = ["-ss", f"{offset_sec:.3f}"]
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-nostdin", "-v", "error",
-            "-ignore_length", "1",
-            *args_ss,
-            "-i", str(src),
-            "-ar", str(SAMPLE_RATE),
-            "-ac", "1",
-            "-f", "s16le",
-            "-",
-        ],
-        capture_output=True,
-        check=True,
-    )
+    return decode_range(src, offset_sec, None)
+
+
+def decode_range(
+    src: str | Path,
+    offset_sec: float,
+    duration_sec: float | None,
+) -> np.ndarray:
+    """Decode a bounded range, or from ``offset_sec`` to EOF when
+    ``duration_sec`` is None. Uses ``-ignore_length 1`` to stay tolerant of
+    recorders that leave the WAV header's ``data`` chunk size stale."""
+    args: list[str] = ["ffmpeg", "-nostdin", "-v", "error", "-ignore_length", "1"]
+    if offset_sec > 0:
+        args += ["-ss", f"{offset_sec:.3f}"]
+    if duration_sec is not None:
+        args += ["-t", f"{duration_sec:.3f}"]
+    args += [
+        "-i", str(src),
+        "-ar", str(SAMPLE_RATE),
+        "-ac", "1",
+        "-f", "s16le",
+        "-",
+    ]
+    proc = subprocess.run(args, capture_output=True, check=True)
     pcm = np.frombuffer(proc.stdout, dtype=np.int16)
     return pcm.astype(np.float32) / 32768.0
