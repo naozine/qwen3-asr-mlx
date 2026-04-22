@@ -128,7 +128,7 @@ curl -N -X POST http://localhost:8000/transcribe-stream \
   -F "path=20260326.wav" -F "chunk_duration=60"
 ```
 
-送信イベント: `start` (音声長・チャンク数) / `chunk` (chunk単位の転写+絶対時刻単語) / `done` (合計) / `error`
+送信イベント: `start` (音声長・チャンク数) / `chunk` (chunk単位の転写+絶対時刻単語) / `done` (合計) / `error`。実装の詳細 (SSE形式、FastAPI async generator、クライアント側パース) は [docs/streaming.ja.md](docs/streaming.ja.md) に解説があります。
 
 SSEを購読してマージ済みJSONを保存するヘルパCLI `stream_client.py` も同梱:
 

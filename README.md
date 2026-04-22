@@ -128,7 +128,7 @@ curl -N -X POST http://localhost:8000/transcribe-stream \
   -F "path=20260326.wav" -F "chunk_duration=60"
 ```
 
-Events emitted: `start` (duration, chunk count), `chunk` (per-chunk text + absolute-time words), `done` (totals), `error`.
+Events emitted: `start` (duration, chunk count), `chunk` (per-chunk text + absolute-time words), `done` (totals), `error`. See [docs/streaming.md](docs/streaming.md) for the full design walkthrough (SSE format, FastAPI async generator, client-side parsing).
 
 A helper CLI consumes this stream and writes a merged JSON compatible with `player.html`:
 
