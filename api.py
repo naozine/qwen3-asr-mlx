@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -40,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from audio_io import decode_to_numpy, resolve_audio_path
+from audio_io import decode_from_offset, decode_to_numpy, resolve_audio_path
 from chunker import AudioChunks
 from transcriber import TranscriptionResult
 from vad_chunker import VADChunks
@@ -128,16 +129,17 @@ app.add_middleware(
 )
 
 
-async def _resolve_audio_source(
+async def _resolve_audio_path(
     file: Optional[UploadFile],
     path: Optional[str],
-) -> tuple[object, Callable[[], None]]:
-    """Return (audio_for_chunker, cleanup_fn).
+) -> tuple[Path, Callable[[], None]]:
+    """Return (audio_path, cleanup_fn).
 
-    - ``path`` mode: resolve against AUDIO_ROOT and decode to numpy here so
-      the chunker does not have to re-do it. cleanup_fn is a no-op.
-    - ``file`` mode: save upload to a temp file, return the path; the
-      chunker will decode. cleanup_fn removes the temp file.
+    - ``path`` mode: resolve against AUDIO_ROOT. ``cleanup`` is a no-op.
+    - ``file`` mode: save the upload to a temp file. ``cleanup`` removes it.
+
+    Both endpoints work off a concrete filesystem path — the streaming
+    endpoint needs it for ``follow`` tail re-reads.
     """
     got_file = file is not None and (file.filename or "") != ""
     if path and got_file:
@@ -149,8 +151,7 @@ async def _resolve_audio_source(
             raise HTTPException(404, str(e))
         except (PermissionError, IsADirectoryError) as e:
             raise HTTPException(400, str(e))
-        audio_np = await run_in_threadpool(decode_to_numpy, resolved)
-        return audio_np, lambda: None
+        return resolved, lambda: None
     if got_file:
         suffix = Path(file.filename).suffix or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -206,10 +207,11 @@ async def transcribe_endpoint(
     language: str = Form("Japanese", description="Language name or ISO code"),
     context: Optional[str] = Form(None, description="Hotwords (Qwen3 backend only)"),
 ) -> TranscribeOut:
-    audio_src, cleanup = await _resolve_audio_source(file, path)
+    audio_path, cleanup = await _resolve_audio_path(file, path)
     try:
+        audio_np = await run_in_threadpool(decode_to_numpy, audio_path)
         result: TranscriptionResult = await run_in_threadpool(
-            transcribe, audio_src, language, context
+            transcribe, audio_np, language, context
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"transcription failed: {exc}") from exc
@@ -237,72 +239,127 @@ async def transcribe_stream_endpoint(
     language: str = Form("Japanese"),
     context: Optional[str] = Form(None),
     chunk_duration: float = Form(60.0, description="Seconds per chunk"),
+    start_offset: float = Form(0.0, description="Seconds into the audio to start from"),
+    follow: bool = Form(
+        False,
+        description="If true, keep reading as the file grows until idle_timeout_seconds elapses without any size change.",
+    ),
+    idle_timeout_seconds: float = Form(
+        15.0,
+        description="In follow mode, finish after this many seconds without new decodable audio. Default is 15 because some recorders (e.g. Audio Hijack) commit header updates every ~10 seconds.",
+    ),
 ) -> StreamingResponse:
-    audio_src, cleanup = await _resolve_audio_source(file, path)
+    import asyncio
+
+    audio_path, cleanup = await _resolve_audio_path(file, path)
 
     async def event_gen():
-        ac = None
+        total_asr = 0.0
+        total_align = 0.0
+        total_words = 0
+        accumulated_text: list[str] = []
+        offset_sec = start_offset
+        last_size = -1
+        last_growth_ts = time.time()
+        stopped_reason = "eof"
         try:
-            ac = await run_in_threadpool(
-                lambda: _make_chunker(audio_src, chunk_duration).__enter__()
-            )
             yield _sse(
                 "start",
                 {
-                    "total_duration": ac.total_duration,
                     "chunk_duration": chunk_duration,
-                    "chunk_count": len(ac.chunks),
+                    "start_offset": start_offset,
+                    "follow": follow,
+                    "idle_timeout_seconds": idle_timeout_seconds,
                     "chunker": CHUNKER,
-                    "speech_coverage": getattr(ac, "speech_coverage", ac.total_duration),
                     "backend": ASR_BACKEND,
                     "asr_model": ASR_MODEL_ID,
                 },
             )
 
-            total_asr = 0.0
-            total_align = 0.0
-            total_words = 0
-            accumulated_text = []
-
-            for idx, (offset, chunk_array) in enumerate(ac.chunks):
+            while True:
                 try:
-                    result: TranscriptionResult = await run_in_threadpool(
-                        transcribe, chunk_array, language, context
-                    )
-                except Exception as exc:
-                    yield _sse("error", {"chunk_index": idx, "message": str(exc)})
+                    current_size = audio_path.stat().st_size
+                except FileNotFoundError:
+                    yield _sse("error", {"message": f"file disappeared: {audio_path}"})
+                    stopped_reason = "missing"
                     return
 
-                words_out = [
-                    {
-                        "text": w.text,
-                        "start": w.start + offset,
-                        "end": w.end + offset,
-                    }
-                    for w in result.words
-                ]
-                accumulated_text.append(result.text)
-                total_asr += result.asr_seconds
-                total_align += result.align_seconds
-                total_words += len(words_out)
+                size_changed = current_size != last_size
+                last_size = current_size
+                if size_changed:
+                    # Read any audio after the last processed offset. Only the
+                    # decoded-byte count is trusted as "real progress"; header
+                    # rewrites and misc. ffmpeg-invisible growth don't count.
+                    audio_tail = await run_in_threadpool(
+                        decode_from_offset, audio_path, offset_sec
+                    )
+                    if len(audio_tail) > 0:
+                        last_growth_ts = time.time()
+                        ac = await run_in_threadpool(
+                            lambda: _make_chunker(audio_tail, chunk_duration).__enter__()
+                        )
+                        try:
+                            for ch_rel_offset, chunk_array in ac.chunks:
+                                abs_start = offset_sec + ch_rel_offset
+                                try:
+                                    result: TranscriptionResult = await run_in_threadpool(
+                                        transcribe, chunk_array, language, context
+                                    )
+                                except Exception as exc:
+                                    yield _sse(
+                                        "error",
+                                        {"chunk_start": abs_start, "message": str(exc)},
+                                    )
+                                    stopped_reason = "chunk_error"
+                                    return
 
-                chunk_end = min(offset + chunk_duration, ac.total_duration)
-                yield _sse(
-                    "chunk",
-                    {
-                        "chunk_index": idx,
-                        "chunk_start": offset,
-                        "chunk_duration": chunk_end - offset,
-                        "text": result.text,
-                        "words": words_out,
-                        "asr_seconds": result.asr_seconds,
-                        "align_seconds": result.align_seconds,
-                    },
-                )
+                                words_out = [
+                                    {
+                                        "text": w.text,
+                                        "start": w.start + abs_start,
+                                        "end": w.end + abs_start,
+                                    }
+                                    for w in result.words
+                                ]
+                                accumulated_text.append(result.text)
+                                total_asr += result.asr_seconds
+                                total_align += result.align_seconds
+                                total_words += len(words_out)
+
+                                chunk_len = len(chunk_array) / 16000.0
+                                yield _sse(
+                                    "chunk",
+                                    {
+                                        "chunk_start": abs_start,
+                                        "chunk_duration": chunk_len,
+                                        "text": result.text,
+                                        "words": words_out,
+                                        "asr_seconds": result.asr_seconds,
+                                        "align_seconds": result.align_seconds,
+                                    },
+                                )
+                            offset_sec += ac.total_duration
+                        finally:
+                            await run_in_threadpool(
+                                lambda: ac.__exit__(None, None, None)
+                            )
+
+                if not follow:
+                    break
+                if time.time() - last_growth_ts > idle_timeout_seconds:
+                    stopped_reason = "idle_timeout"
+                    break
+                try:
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    stopped_reason = "cancelled"
+                    raise
 
             yield _sse(
                 "done",
                 {
+                    "reason": stopped_reason,
+                    "end_offset": offset_sec,
                     "text": "".join(accumulated_text).strip(),
                     "total_words": total_words,
                     "total_asr_seconds": total_asr,
@@ -312,8 +369,6 @@ async def transcribe_stream_endpoint(
         except Exception as exc:
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:
-            if ac is not None:
-                await run_in_threadpool(lambda: ac.__exit__(None, None, None))
             cleanup()
 
     return StreamingResponse(

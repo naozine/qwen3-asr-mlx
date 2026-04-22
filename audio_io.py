@@ -61,3 +61,33 @@ def decode_to_numpy(src: str | Path) -> np.ndarray:
     )
     pcm = np.frombuffer(proc.stdout, dtype=np.int16)
     return pcm.astype(np.float32) / 32768.0
+
+
+def decode_from_offset(src: str | Path, offset_sec: float) -> np.ndarray:
+    """Decode from ``offset_sec`` to the current EOF.
+
+    Uses ``-ignore_length 1`` so the decoder reads past a stale WAV header
+    size if the recorder (e.g. Audio Hijack) has not updated it yet; this
+    is essential for the ``follow=true`` streaming mode where the file is
+    still being written.
+    """
+    if offset_sec <= 0:
+        args_ss: list[str] = []
+    else:
+        args_ss = ["-ss", f"{offset_sec:.3f}"]
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-v", "error",
+            "-ignore_length", "1",
+            *args_ss,
+            "-i", str(src),
+            "-ar", str(SAMPLE_RATE),
+            "-ac", "1",
+            "-f", "s16le",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    pcm = np.frombuffer(proc.stdout, dtype=np.int16)
+    return pcm.astype(np.float32) / 32768.0

@@ -65,6 +65,7 @@ def test_health_reports_chunker_and_backend(client):
 
 def test_transcribe_returns_expected_shape(client, monkeypatch):
     import api
+    import numpy as np
     from transcriber import TranscriptionResult, Word
 
     fake = TranscriptionResult(
@@ -77,7 +78,8 @@ def test_transcribe_returns_expected_shape(client, monkeypatch):
         asr_seconds=0.12,
         align_seconds=0.08,
     )
-    monkeypatch.setattr(api, "transcribe", lambda path, lang, ctx: fake)
+    monkeypatch.setattr(api, "decode_to_numpy", lambda p: np.zeros(16000, dtype=np.float32))
+    monkeypatch.setattr(api, "transcribe", lambda audio, lang, ctx: fake)
 
     files = {"file": ("sample.wav", b"RIFF....FAKE", "audio/wav")}
     r = client.post(
@@ -96,10 +98,12 @@ def test_transcribe_returns_expected_shape(client, monkeypatch):
 
 def test_transcribe_propagates_server_error(client, monkeypatch):
     import api
+    import numpy as np
 
-    def raises(path, lang, ctx):
+    def raises(audio, lang, ctx):
         raise RuntimeError("synthetic failure")
 
+    monkeypatch.setattr(api, "decode_to_numpy", lambda p: np.zeros(16000, dtype=np.float32))
     monkeypatch.setattr(api, "transcribe", raises)
     files = {"file": ("x.wav", b"\0", "audio/wav")}
     r = client.post("/transcribe", files=files, data={"language": "Japanese"})

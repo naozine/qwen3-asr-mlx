@@ -19,3 +19,6 @@ result_*.json
 
 # IDE
 .idea/
+
+# macOS
+.DS_Store
