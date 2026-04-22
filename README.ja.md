@@ -2,43 +2,57 @@
 
 **English**: [README.md](README.md) | **日本語**: このページ
 
-Apple Silicon で 2 つの ASR バックエンドを使い分け、単語タイムスタンプ付きの転写をブラウザ上で可視化する最小構成。CLI / REST API / ブラウザUI の3経路から叩ける。
+Apple Silicon 上の MLX で動く音声文字起こしサーバ。2つのバックエンドを切替可能、VADベースのストリーミング処理で長尺に対応。CLI / SSEストリーミング対応のFastAPIサーバ / ブラウザUIから使える。
 
-- **Qwen3-ASR-1.7B (bf16)** + **Qwen3-ForcedAligner-0.6B** — 精度優先、ホットワードで単語を効かせられる
-- **Whisper large-v3-turbo (fp16)** — 高速なワンパス転写、word timestamps が本体に内蔵
-
-サーバ起動時に `ASR_BACKEND` 環境変数で切替。
+- **Qwen3-ASR-1.7B (bf16)** + **Qwen3-ForcedAligner-0.6B** — 精度優先、ホットワード対応
+- **Whisper large-v3-turbo (fp16)** — 高速なワンパス転写、word timestamps 内蔵
+- どちらのバックエンドでも出力スキーマ・APIコントラクト・ブラウザUIは共通
 
 <!-- ![demo](docs/demo.gif) -->
 
 ## Why
-- **2つの強いバックエンド、1つのスキーマ** — UI や CLI の出力形式を維持したまま Qwen3-ASR ↔ Whisper を差し替え可能
-- **Apple Silicon ネイティブ**: MLX 経由で PyTorch 比 3〜4倍
-- **単語タイムスタンプ**: Qwen3 は ForcedAligner、Whisper は自前の cross-attention。両方とも `{text, start, end}` の同じスキーマで返すので、UI は意識せず扱える
-- **ローカル完結**: クラウド不要、音声は外に出ない
+
+- **2つの強いバックエンド、共通スキーマ** — `ASR_BACKEND` で起動時に選ぶだけ、下流は一切変えずに切替可
+- **VAD連動の長尺ストリーミング** — silero-vad で無音を除外、メモリ上でチャンク化、確定した chunk から順次 Server-Sent Events でクライアントへ返す。M4 MacBook で 2時間音声を ~10〜30分で処理
+- **Apple Silicon ネイティブ** — 全面 MLX、PyTorch 依存なし。silero-vad は onnxruntime で実行
+- **他サービスから呼ばれる設計** — アップロード不要の `path=` モード、`AUDIO_ROOT` ジェイル、`GET /audio` エンドポイントを備え、将来の音声管理ウェブアプリと組合せやすい
+- **ローカル完結** — クラウド往復なし。プライベートな会議録や機密音声でも安心
 
 ## アーキテクチャ
 
 ```
-                 ┌─────────────────────────────┐
-                 │ ASR_BACKEND=qwen3           │
-  ┌──────────┐   │   Qwen3-ASR-1.7B-bf16 ──▶   │ 転写
-  │  audio   │──▶│   Qwen3-ForcedAligner ──▶   │ 単語タイムスタンプ
-  │ (wav/..) │   │                             │
-  └──────────┘   │ ASR_BACKEND=whisper         │
-                 │   whisper-large-v3-turbo ─▶ │ 転写 + 単語タイムスタンプ
-                 └──────────┬──────────────────┘
-                            │
-              ┌─────────────┼──────────────┐
-              ▼             ▼              ▼
-       ┌──────────────┐ ┌──────────┐ ┌────────────────┐
-       │ CLI (Qwen3)  │ │ CLI      │ │ FastAPI server │
-       │ transcribe.py│ │ (Whisper)│ └──────┬─────────┘
-       └──────────────┘ └──────────┘        ▼
-                                    ┌────────────────┐
-                                    │  player.html   │
-                                    │  (timeline UI) │
-                                    └────────────────┘
+ 音声ファイル ──▶ ffmpeg pipe ──▶ numpy (in memory)
+                                    │
+                                    ▼
+                           ┌──────────────────┐
+                           │  CHUNKER=vad     │ (デフォルト, silero-vad / ONNX)
+                           │  CHUNKER=fixed   │ (固定秒数チャンク)
+                           └────────┬─────────┘
+                                    │  話速部分だけのnumpyスライス
+                ┌───────────────────┼───────────────────┐
+                ▼                                       ▼
+    ┌─────────────────────────────┐        ┌─────────────────────────────┐
+    │ ASR_BACKEND=qwen3           │        │ ASR_BACKEND=whisper         │
+    │   Qwen3-ASR-1.7B-bf16       │        │   whisper-large-v3-turbo    │
+    │   Qwen3-ForcedAligner-0.6B  │        │   (word timestamps 内蔵)     │
+    └──────────────┬──────────────┘        └──────────────┬──────────────┘
+                   │                                      │
+                   └──────────────────┬───────────────────┘
+                                      ▼
+                       { text, language, words:[{text,start,end}], ... }
+                                      │
+         ┌────────────────────────────┼───────────────────────────┐
+         ▼                            ▼                           ▼
+  ┌─────────────┐            ┌─────────────────┐        ┌──────────────────┐
+  │  CLI        │            │  FastAPI        │        │  stream_client   │
+  │  transcribe │            │  + SSE streaming│◀──────▶│  (CLIのSSE購読)  │
+  └─────────────┘            └────────┬────────┘        └──────────────────┘
+                                      ▼
+                             ┌──────────────────┐
+                             │  player.html     │
+                             │  (タイムラインUI, │
+                             │   ストリーム対応)  │
+                             └──────────────────┘
 ```
 
 ## 使用モデル
@@ -46,8 +60,9 @@ Apple Silicon で 2 つの ASR バックエンドを使い分け、単語タイ�
 | バックエンド | モデル | ライセンス | 備考 |
 | --- | --- | --- | --- |
 | `qwen3` | [mlx-community/Qwen3-ASR-1.7B-bf16](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16) | Apache-2.0 | 精度優先、多言語、ホットワード対応 |
-| `qwen3` | [mlx-community/Qwen3-ForcedAligner-0.6B-8bit](https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-8bit) | Apache-2.0 | 単語アライメント (5分以内) |
+| `qwen3` | [mlx-community/Qwen3-ForcedAligner-0.6B-8bit](https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-8bit) | Apache-2.0 | 単語アライメント (1チャンク5分以内) |
 | `whisper` | [mlx-community/whisper-large-v3-turbo](https://huggingface.co/mlx-community/whisper-large-v3-turbo) | MIT | fp16、809Mパラメータ、word timestamps 内蔵 |
+| VAD | [silero-vad](https://github.com/snakers4/silero-vad) (ONNX、~2MB) | MIT | 初回実行時に自動DL |
 
 MLX移植版は [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio) を利用。
 
@@ -55,7 +70,7 @@ MLX移植版は [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio) を利
 
 - Apple Silicon Mac (M1/M2/M3/M4 系)
 - Python ≥3.12 (`uv` 推奨)
-- `ffmpeg` (WAV以外を扱う場合)
+- `ffmpeg` (インストール済み+ PATH 通し)
 - 初回DL: Qwen3で約 **4.8 GB**、Whisperで約 **1.6 GB** (`~/.cache/huggingface/`)
 
 ## Quick Start
@@ -80,39 +95,82 @@ uv run python transcribe_whisper.py path/to/audio.wav --language ja
 ### 2. REST API
 
 ```bash
-# デフォルト: Qwen3-ASR
+# デフォルト: Qwen3-ASR + VAD
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
 
-# Whisper
-ASR_BACKEND=whisper uv run uvicorn api:app --host 0.0.0.0 --port 8000
+# Whisper + 固定チャンカー + AUDIO_ROOT ジェイル
+ASR_BACKEND=whisper CHUNKER=fixed AUDIO_ROOT=$PWD \
+    uv run uvicorn api:app --host 0.0.0.0 --port 8000
 
-# 稼働中のバックエンド確認
+# 稼働状態の確認
 curl http://localhost:8000/health
-# {"status":"ok","backend":"qwen3","asr_model":"...","aligner_model":"..."}
+# {"status":"ok","backend":"qwen3","chunker":"vad","asr_model":"...","audio_root":"..."}
 ```
 
 `http://localhost:8000/docs` で OpenAPI 画面。
 
-curl 例:
+#### 同期エンドポイント `/transcribe`
+
 ```bash
+# アップロード方式
 curl -X POST http://localhost:8000/transcribe \
-  -F "file=@audio.wav" \
-  -F "language=Japanese" \
-  -F "context=固有名詞,業界用語"
+  -F "file=@audio.wav" -F "language=Japanese"
+
+# ローカルパス方式 (アップロードなし)
+curl -X POST http://localhost:8000/transcribe \
+  -F "path=subdir/audio.wav" -F "language=Japanese"
 ```
+
+#### ストリーミング `/transcribe-stream` (長尺向け)
+
+```bash
+curl -N -X POST http://localhost:8000/transcribe-stream \
+  -F "path=20260326.wav" -F "chunk_duration=60"
+```
+
+送信イベント: `start` (音声長・チャンク数) / `chunk` (chunk単位の転写+絶対時刻単語) / `done` (合計) / `error`
+
+SSEを購読してマージ済みJSONを保存するヘルパCLI `stream_client.py` も同梱:
+
+```bash
+uv run python stream_client.py ./20260326.wav --chunk-duration 60
+# → result_stream.json (stdoutには進捗)
+```
+
+#### 音声取得 `/audio`
+
+```bash
+curl "http://localhost:8000/audio?path=subdir/audio.wav" -o /tmp/a.wav
+```
+
+HTTP Range 対応なので `<audio>` のシーク付き再生に使える。`AUDIO_ROOT` の制約は `/transcribe` と同じ。
 
 ### 3. ブラウザUI (`player.html`)
 
-`player.html` をダブルクリックで開く。2通りの使い方:
+`player.html` をダブルクリックで開く。3通りの使い方:
 
-- **JSON読み込み**: CLIで生成した `result*.json` と音声ファイルをドラッグ&ドロップ
-- **APIで転写**: 音声ファイルをドロップ → 「APIで転写」ボタン (サーバ起動時に選んだバックエンドで処理される)
+1. **JSON読み込み**: CLIで生成した `result*.json` と音声をドラッグ&ドロップ
+2. **アップロード + 転写**: 音声をドロップ → 「Upload file」のまま「Send transcription request」
+3. **パス + 転写**: 「Server path」に切替、パスを入力 (`AUDIO_ROOT` があれば相対パス可) → 送信。音声は `/audio?path=…` から自動取得され再生可
+
+ストリームモード(デフォルトON)で VAD chunk 単位に文字が追記されていく。
 
 #### UI機能
-- 2ビュー切替: **流れ** (無音可視化+段落化) / **タイムライン** (時間軸絶対配置)
+- 2ビュー: **流れ** (無音可視化+段落化) / **タイムライン** (絶対時間軸、赤い再生ヘッド)
 - 話速に応じたフォントサイズ (早口は小さく)
-- 単語クリックでシーク、再生中の単語ハイライト、再生ヘッド表示
+- 単語クリックでシーク、再生中の単語ハイライト
 - `Space` 再生/停止、`←`/`→` 5秒送り
+- Server path 選択時に `/health` を参照、placeholderに `AUDIO_ROOT` ルールを反映
+
+## 環境変数
+
+| 変数 | デフォルト | 目的 |
+| --- | --- | --- |
+| `ASR_BACKEND` | `qwen3` | 転写モデル: `qwen3` or `whisper` |
+| `CHUNKER` | `vad` | チャンク戦略: `vad` (silero-vad) or `fixed` (固定秒) |
+| `AUDIO_ROOT` | *(未設定)* | 設定時、`path=` はこのディレクトリ配下に限定。相対パスはこの配下を起点に解決。 |
+
+変更時はサーバ再起動が必要。
 
 ## バックエンドの選び方
 
@@ -120,12 +178,13 @@ curl -X POST http://localhost:8000/transcribe \
 | --- | --- | --- |
 | モデルサイズ / 初回DL | ~4.8 GB | ~1.6 GB |
 | メモリ消費 | ~5 GB | ~1.6 GB |
-| M4 での速度感 | 基準 | ~2〜3倍速 |
+| M4 での速度感 | ~3〜4倍速 | ~6〜10倍速 |
 | ホットワード / コンテキスト注入 | ✅ | ❌ |
-| 長尺 (5分超) の単語タイムスタンプ | チャンク分割が必要 (TODO) | 本体で対応 |
+| 長尺対応 (VAD併用) | ✅ (チャンクは aligner 制約内) | ✅ |
+| 日本語の無音ハルシネーション | 少ない | 出やすい (VADで抑制) |
 | 日本語など非英語の精度 | 非常に強い | 強い |
 
-目安: **whisper** を速度・長尺用のデフォルトに、ドメイン固有の短い音声や固有名詞注入が必要なら **qwen3** へ切替。
+日本語用途の目安: 品質なら **qwen3 + VAD**、速度なら **whisper + VAD**。VAD だけでも Whisper の「ご視聴ありがとうございました」系の無音区間ハルシネーションは大幅に減る。
 
 ## API レスポンス例
 
@@ -148,20 +207,20 @@ curl -X POST http://localhost:8000/transcribe \
 uv run pytest
 ```
 
-モデルロード・推論はモック化した API スモークテスト (`tests/test_api.py`) を同梱。実モデルによる統合テストは対象外。`ASR_BACKEND` で選択したバックエンドに対して走ります。
+`tests/test_api.py` に `/health` と `/transcribe` のバリデーション系スモークテスト。モデル層はモック化しておりCIでHugging Faceに触りません。`ASR_BACKEND` で選ばれたバックエンドに対して実行されます。
 
 ## 既知の制約
 
-- **Qwen3-ForcedAligner は 5分以内の音声**対象。長尺対応は自前でチャンク分割+連結が必要 (TODO)。Whisper バックエンドでは該当せず
-- **同期API のみ**。15分を超える音声は HTTP タイムアウトに注意
-- **CORS は `*` で開放**。ローカル/LAN用途前提。外部公開時はオリジン制限を
-- 並列リクエストは内部でシリアル化される (MLXモデルはスレッドセーフでない前提)
-- `ASR_BACKEND` の切替はサーバ再起動が必要 (hot-swap不可)
+- **Qwen3-ForcedAligner は 5分/呼び出しまで**。VADチャンカーは制約内に収まるが、`CHUNKER=fixed` + Qwen3 + 長い `chunk_duration` の組合せは失敗する
+- **`/transcribe` は同期のみ**。15分超の音声は `/transcribe-stream` を使う (同期だとHTTPタイムアウト)
+- **CORS は `*`**。ローカル/LAN用途前提。外部公開時はオリジン制限を
+- 並列転写リクエストは内部でシリアル化 (MLXモデルはスレッドセーフでない前提)
+- `ASR_BACKEND` / `CHUNKER` / `AUDIO_ROOT` の切替はサーバ再起動が必要
 
 ## ロードマップ
 
-- [ ] Qwen3-ForcedAligner の 5分制約を吸収する長尺チャンクパイプライン
-- [ ] 非同期ジョブAPI (`/jobs/{id}/status`)
+- [ ] 非同期ジョブAPI (`/jobs/{id}/status`) で長尺処理のクライアント切断耐性
+- [ ] 認証 (multi-tenant 対応、`X-API-Key` 等)
 - [ ] 精度ベンチマーク (Qwen3 vs Whisper vs kotoba-whisper)
 - [ ] GitHub Actions (lint / test)
 
@@ -169,10 +228,11 @@ uv run pytest
 
 - Alibaba Qwen team — Qwen3-ASR / Qwen3-ForcedAligner
 - OpenAI — Whisper
+- Silero Team — silero-vad
 - Apple — MLX
 - Prince Canuma ([@Blaizzy](https://github.com/Blaizzy)) — mlx-audio
-- mlx-community — MLX量子化・bf16・fp16 変換モデルの提供
+- mlx-community — MLX量子化/bf16/fp16変換モデル
 
 ## License
 
-MIT — [LICENSE](LICENSE) 参照。使用モデルは Qwen3 系 が Apache-2.0、Whisper が MIT で配布されています。利用時はそれぞれの条項にも従ってください。
+MIT — [LICENSE](LICENSE) 参照。使用モデルは Qwen3系 Apache-2.0、Whisper MIT、silero-vad MIT で配布。利用時はそれぞれの条項にも従ってください。
