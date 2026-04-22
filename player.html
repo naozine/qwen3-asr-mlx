@@ -186,6 +186,15 @@
     <input id="api-url" type="text" value="http://localhost:8000">
   </div>
   <div class="row">
+    <label>Source</label>
+    <label><input type="radio" name="api-src" value="upload" checked> Upload file</label>
+    <label><input type="radio" name="api-src" value="path"> Server path</label>
+    <input id="api-path" type="text" placeholder="/absolute/path/on/server.wav" style="flex:1; display:none">
+  </div>
+  <div class="row" id="api-path-hint" style="display:none; color:var(--muted); font-size:12px">
+    <span id="api-path-hint-text"></span>
+  </div>
+  <div class="row">
     <label>Language</label>
     <input id="api-language" type="text" value="Japanese" style="flex:0 0 140px">
     <label>Context</label>
@@ -245,9 +254,73 @@ const apiCancel = document.getElementById('api-cancel');
 const apiStatus = document.getElementById('api-status');
 const apiStream = document.getElementById('api-stream');
 const apiChunk = document.getElementById('api-chunk');
+const apiPath = document.getElementById('api-path');
+const apiPathHint = document.getElementById('api-path-hint');
+const apiPathHintText = document.getElementById('api-path-hint-text');
+const apiSourceRadios = document.getElementsByName('api-src');
+
+let serverAudioRoot = null;
+
+async function fetchServerInfo() {
+  try {
+    const r = await fetch(apiBase() + '/health');
+    if (!r.ok) return;
+    const h = await r.json();
+    serverAudioRoot = h.audio_root || null;
+    if (serverAudioRoot) {
+      apiPath.placeholder = `relative/to/${serverAudioRoot.split('/').pop() || 'root'}.wav`;
+      apiPathHintText.textContent = `AUDIO_ROOT = ${serverAudioRoot} — relative paths are resolved against it.`;
+    } else {
+      apiPath.placeholder = '/absolute/path/on/server.wav';
+      apiPathHintText.textContent = 'AUDIO_ROOT is unset on the server — absolute paths only.';
+    }
+  } catch (e) {
+    apiPathHintText.textContent = `Cannot reach ${apiBase()}/health (${e.message}).`;
+  }
+}
 const apiProgressWrap = document.getElementById('api-progress-wrap');
 const apiProgressBar = document.getElementById('api-progress-bar');
 let activeAbort = null;
+
+function apiSourceMode() {
+  for (const r of apiSourceRadios) if (r.checked) return r.value;
+  return 'upload';
+}
+function refreshSubmitEnabled() {
+  const mode = apiSourceMode();
+  if (mode === 'upload') {
+    apiSubmit.disabled = !currentAudioFile;
+  } else {
+    apiSubmit.disabled = !apiPath.value.trim();
+  }
+}
+function loadAudioFromServerPath() {
+  const p = apiPath.value.trim();
+  if (!p) return;
+  const url = apiBase() + '/audio?path=' + encodeURIComponent(p);
+  audio.src = url;
+  currentAudioFile = null;
+  setApiStatus(`Audio source: ${p} (via ${apiBase()}/audio)`);
+}
+for (const r of apiSourceRadios) {
+  r.addEventListener('change', () => {
+    const mode = apiSourceMode();
+    apiPath.style.display = mode === 'path' ? '' : 'none';
+    apiPathHint.style.display = mode === 'path' ? 'block' : 'none';
+    if (mode === 'path') {
+      fetchServerInfo();
+      loadAudioFromServerPath();
+    }
+    refreshSubmitEnabled();
+  });
+}
+apiUrl.addEventListener('change', () => {
+  if (apiSourceMode() === 'path') fetchServerInfo();
+});
+apiPath.addEventListener('input', refreshSubmitEnabled);
+apiPath.addEventListener('change', () => {
+  if (apiSourceMode() === 'path') loadAudioFromServerPath();
+});
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -454,7 +527,6 @@ async function handleFiles(files) {
     if (f.type.startsWith('audio/') || /\.(wav|mp3|m4a|flac|ogg)$/i.test(f.name)) {
       audio.src = URL.createObjectURL(f);
       currentAudioFile = f;
-      apiSubmit.disabled = false;
       setApiStatus(`Audio loaded: ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`);
     } else if (f.name.endsWith('.json') || f.type === 'application/json') {
       const text = await f.text();
@@ -462,6 +534,7 @@ async function handleFiles(files) {
       catch (e) { setStatus('JSON parse failed: ' + e.message); }
     }
   }
+  refreshSubmitEnabled();
 }
 
 function setApiStatus(msg, level = '') {
@@ -471,7 +544,11 @@ function setApiStatus(msg, level = '') {
 
 function buildFormData() {
   const fd = new FormData();
-  fd.append('file', currentAudioFile);
+  if (apiSourceMode() === 'path') {
+    fd.append('path', apiPath.value.trim());
+  } else {
+    fd.append('file', currentAudioFile);
+  }
   fd.append('language', apiLanguage.value.trim() || 'Japanese');
   const ctx = apiContext.value.trim();
   if (ctx) fd.append('context', ctx);
@@ -592,7 +669,13 @@ async function submitStreaming() {
 }
 
 async function submitToApi() {
-  if (!currentAudioFile) { setApiStatus('No audio file loaded.', 'err'); return; }
+  const mode = apiSourceMode();
+  if (mode === 'upload' && !currentAudioFile) {
+    setApiStatus('No audio file loaded.', 'err'); return;
+  }
+  if (mode === 'path' && !apiPath.value.trim()) {
+    setApiStatus('Server path is empty.', 'err'); return;
+  }
   const url = apiUrl.value.trim();
   if (!url) { setApiStatus('Base URL is empty.', 'err'); return; }
 

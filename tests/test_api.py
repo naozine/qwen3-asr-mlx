@@ -33,9 +33,34 @@ def test_health_returns_ok(client):
     assert body["asr_model"]  # non-empty
 
 
-def test_transcribe_missing_file_returns_422(client):
+def test_transcribe_missing_audio_returns_400(client):
     r = client.post("/transcribe", data={"language": "Japanese"})
-    assert r.status_code == 422
+    assert r.status_code == 400
+    assert "file" in r.json()["detail"] or "path" in r.json()["detail"]
+
+
+def test_transcribe_rejects_both_file_and_path(client):
+    files = {"file": ("x.wav", b"\0", "audio/wav")}
+    r = client.post(
+        "/transcribe",
+        files=files,
+        data={"language": "Japanese", "path": "/tmp/other.wav"},
+    )
+    assert r.status_code == 400
+
+
+def test_transcribe_path_not_found_returns_404(client):
+    r = client.post(
+        "/transcribe",
+        data={"language": "Japanese", "path": "/nonexistent/path/__does_not_exist__.wav"},
+    )
+    assert r.status_code == 404
+
+
+def test_health_reports_chunker_and_backend(client):
+    body = client.get("/health").json()
+    assert body["chunker"] in {"vad", "fixed"}
+    assert body["backend"] in {"qwen3", "whisper"}
 
 
 def test_transcribe_returns_expected_shape(client, monkeypatch):

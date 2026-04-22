@@ -10,11 +10,15 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+import numpy as np
 
 from mlx_audio.stt.utils import load_model
 
 from transcriber import TranscriptionResult, Word
+
+AudioInput = Union[str, Path, np.ndarray]
 
 ASR_MODEL_ID = "mlx-community/whisper-large-v3-turbo"
 # Whisper has built-in word timestamps; no separate aligner is needed.
@@ -125,18 +129,23 @@ def _to_language_code(language: str) -> Optional[str]:
 
 
 def transcribe(
-    audio_path: str | Path,
+    audio: AudioInput,
     language: str = "Japanese",
     context: Optional[str] = None,  # unused; kept for API compatibility
 ) -> TranscriptionResult:
-    """Transcribe an audio file with Whisper (word timestamps built-in)."""
+    """Transcribe audio with Whisper (word timestamps built-in).
+
+    ``audio`` can be a filesystem path or a pre-decoded 16 kHz mono
+    float32 numpy array.
+    """
     del context  # Whisper does not use hotword context prompts
     load_models()
+    audio_arg = str(audio) if isinstance(audio, (str, Path)) else audio
 
     with _lock:
         t0 = time.time()
         result = _model.generate(
-            str(audio_path),
+            audio_arg,
             language=_to_language_code(language),
             word_timestamps=True,
             verbose=False,

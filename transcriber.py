@@ -5,9 +5,13 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+import numpy as np
 
 from mlx_audio.stt.utils import load_model
+
+AudioInput = Union[str, Path, np.ndarray]
 
 ASR_MODEL_ID = "mlx-community/Qwen3-ASR-1.7B-bf16"
 ALIGNER_MODEL_ID = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
@@ -44,30 +48,31 @@ def load_models() -> None:
 
 
 def transcribe(
-    audio_path: str | Path,
+    audio: AudioInput,
     language: str = "Japanese",
     context: Optional[str] = None,
 ) -> TranscriptionResult:
-    """Transcribe an audio file and attach word-level timestamps.
+    """Transcribe an audio source and attach word-level timestamps.
 
-    MLX models are treated as non-thread-safe, so the whole pipeline is
-    serialized under a single lock.
+    ``audio`` can be a filesystem path or a pre-decoded 16 kHz mono
+    float32 numpy array. MLX models are treated as non-thread-safe, so
+    the whole pipeline is serialized under a single lock.
     """
     import time
 
     load_models()
-    audio_str = str(audio_path)
+    audio_arg = str(audio) if isinstance(audio, (str, Path)) else audio
 
     with _lock:
         t0 = time.time()
         asr_kwargs: dict = {"verbose": False}
         if context:
             asr_kwargs["context"] = context
-        asr_out = _asr.generate(audio_str, **asr_kwargs)
+        asr_out = _asr.generate(audio_arg, **asr_kwargs)
         asr_seconds = time.time() - t0
 
         t0 = time.time()
-        align = _aligner.generate(audio_str, text=asr_out.text, language=language)
+        align = _aligner.generate(audio_arg, text=asr_out.text, language=language)
         align_seconds = time.time() - t0
 
     words = [Word(text=it.text, start=it.start_time, end=it.end_time) for it in align.items]
